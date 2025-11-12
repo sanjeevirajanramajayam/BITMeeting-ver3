@@ -4,6 +4,7 @@ import { parse, isSameDay, isAfter } from 'date-fns';
 import { useNavigate } from 'react-router-dom';
 import "../styles/Dashboard.css";
 import DashboardRightPanel from "../components/DashboardRightPanel";
+import AlternateRequestNotification from "../components/AlternateRequestNotification";
 import noTodoImage from "../assets/nomeetings.png";
 import profileImage from "../assets/profileimage.png";
 import SearchIcon from '@mui/icons-material/Search';
@@ -139,6 +140,9 @@ const Dashboard = () => {
     <div className="main-container">
       {/* Left Panel */}
       <div className="left-panel">
+        {/* Alternate Request Notifications */}
+        <AlternateRequestNotification />
+
         {/* Tabs */}
         <div className="tabs">
           {tabs.map((tab) => (

@@ -301,7 +301,11 @@ const createMeeting = async (req, res) => {
                     members
                 }) =>
                 members.map(memberId =>
-                    db.query('INSERT INTO meeting_members (meeting_id, role, user_id) VALUES (?, ?, ?)', [meetingId, role, memberId])
+                    db.query(
+                        'INSERT INTO meeting_members (meeting_id, role, user_id) VALUES (?, ?, ?) ' +
+                        'ON DUPLICATE KEY UPDATE role = VALUES(role)',
+                        [meetingId, role, memberId]
+                    )
                 )
             );
 
@@ -461,7 +465,11 @@ const updateMeeting = async (req, res) => {
                         members
                     }) =>
                     members.map(memberId =>
-                        db.query('INSERT INTO meeting_members (meeting_id, role, user_id) VALUES (?, ?, ?)', [meetingId, role, memberId])
+                        db.query(
+                            'INSERT INTO meeting_members (meeting_id, role, user_id) VALUES (?, ?, ?) ' +
+                            'ON DUPLICATE KEY UPDATE role = VALUES(role)',
+                            [meetingId, role, memberId]
+                        )
                     )
                 );
 
@@ -2444,6 +2452,352 @@ const getForwardedPointHistory = async (req, res) => {
     }
 };
 
+// Create alternate request when user can't attend
+const createAlternateRequest = async (req, res) => {
+    const { meetingId, alternateUserId, reason } = req.body;
+    const requestingUserId = req.user.userId;
+
+    if (!meetingId || !alternateUserId) {
+        return res.status(400).json({
+            success: false,
+            message: 'meetingId and alternateUserId are required'
+        });
+    }
+
+    try {
+        // Verify requesting user is a member of the meeting
+        const [memberCheck] = await db.query(
+            `SELECT * FROM meeting_members WHERE meeting_id = ? AND user_id = ?`,
+            [meetingId, requestingUserId]
+        );
+
+        if (memberCheck.length === 0) {
+            return res.status(403).json({
+                success: false,
+                message: 'You are not a member of this meeting'
+            });
+        }
+
+        // Verify alternate user is also a member or can be added
+        const [alternateCheck] = await db.query(
+            `SELECT * FROM users WHERE id = ?`,
+            [alternateUserId]
+        );
+
+        if (alternateCheck.length === 0) {
+            return res.status(404).json({
+                success: false,
+                message: 'Alternate user not found'
+            });
+        }
+
+        // Check if there's already a pending request
+        const [existingRequest] = await db.query(
+            `SELECT * FROM meeting_alternate_requests 
+             WHERE meeting_id = ? AND requesting_user_id = ? 
+             AND status IN ('pending', 'alternate_accepted')`,
+            [meetingId, requestingUserId]
+        );
+
+        if (existingRequest.length > 0) {
+            return res.status(409).json({
+                success: false,
+                message: 'You already have a pending alternate request for this meeting'
+            });
+        }
+
+        // Create the alternate request
+        const [result] = await db.query(
+            `INSERT INTO meeting_alternate_requests 
+             (meeting_id, requesting_user_id, alternate_user_id, reason, status)
+             VALUES (?, ?, ?, ?, 'pending')`,
+            [meetingId, requestingUserId, alternateUserId, reason || null]
+        );
+
+        // Also mark the user as rejected
+        await db.query(
+            `INSERT INTO meeting_rejections (meeting_id, user_id, reason) 
+             VALUES (?, ?, ?)
+             ON DUPLICATE KEY UPDATE reason = VALUES(reason)`,
+            [meetingId, requestingUserId, reason || 'Requested alternate']
+        );
+
+        res.status(201).json({
+            success: true,
+            message: 'Alternate request created successfully',
+            requestId: result.insertId
+        });
+
+    } catch (error) {
+        console.error('Error creating alternate request:', error);
+        res.status(500).json({
+            success: false,
+            message: 'Server error'
+        });
+    }
+};
+
+// Alternate user responds to the request (accept/reject)
+const respondToAlternateRequest = async (req, res) => {
+    const { requestId, response } = req.body; // response: 'accept' or 'reject'
+    const alternateUserId = req.user.userId;
+
+    if (!requestId || !response) {
+        return res.status(400).json({
+            success: false,
+            message: 'requestId and response are required'
+        });
+    }
+
+    if (!['accept', 'reject'].includes(response)) {
+        return res.status(400).json({
+            success: false,
+            message: 'response must be "accept" or "reject"'
+        });
+    }
+
+    try {
+        // Verify the request exists and is for this user
+        const [request] = await db.query(
+            `SELECT * FROM meeting_alternate_requests 
+             WHERE id = ? AND alternate_user_id = ? AND status = 'pending'`,
+            [requestId, alternateUserId]
+        );
+
+        if (request.length === 0) {
+            return res.status(404).json({
+                success: false,
+                message: 'Request not found or not for you'
+            });
+        }
+
+        const newStatus = response === 'accept' ? 'alternate_accepted' : 'alternate_rejected';
+
+        await db.query(
+            `UPDATE meeting_alternate_requests 
+             SET status = ?, alternate_response_date = CURRENT_TIMESTAMP
+             WHERE id = ?`,
+            [newStatus, requestId]
+        );
+
+        res.status(200).json({
+            success: true,
+            message: `Alternate request ${response}ed successfully`
+        });
+
+    } catch (error) {
+        console.error('Error responding to alternate request:', error);
+        res.status(500).json({
+            success: false,
+            message: 'Server error'
+        });
+    }
+};
+
+// Get alternate requests (for alternate user to see their pending requests)
+const getAlternateRequests = async (req, res) => {
+    const userId = req.user.userId;
+    const { meetingId, status } = req.query;
+
+    console.log('getAlternateRequests called:', { userId, meetingId, status });
+
+    try {
+        let query = `
+            SELECT 
+                ar.*,
+                m.meeting_name as meeting_title,
+                m.start_time as meeting_date,
+                requesting_user.name as requesting_user_name,
+                requesting_user.email as requesting_user_email,
+                alternate_user.name as alternate_user_name,
+                alternate_user.email as alternate_user_email
+            FROM meeting_alternate_requests ar
+            JOIN meeting m ON ar.meeting_id = m.id
+            JOIN users requesting_user ON ar.requesting_user_id = requesting_user.id
+            JOIN users alternate_user ON ar.alternate_user_id = alternate_user.id
+            WHERE ar.alternate_user_id = ?
+        `;
+        const params = [userId];
+
+        if (meetingId) {
+            query += ` AND ar.meeting_id = ?`;
+            params.push(meetingId);
+        }
+
+        if (status) {
+            query += ` AND ar.status = ?`;
+            params.push(status);
+        }
+
+        query += ` ORDER BY ar.request_date DESC`;
+
+        console.log('Executing query:', query);
+        console.log('With params:', params);
+
+        const [requests] = await db.query(query, params);
+
+        console.log('Found requests:', requests.length);
+
+        res.status(200).json({
+            success: true,
+            data: requests,
+            count: requests.length
+        });
+
+    } catch (error) {
+        console.error('Error fetching alternate requests:', error);
+        res.status(500).json({
+            success: false,
+            message: 'Server error',
+            error: error.message
+        });
+    }
+};
+
+// Get alternate requests for admin approval
+const getAlternateRequestsForAdmin = async (req, res) => {
+    const { meetingId } = req.params;
+    const userId = req.user.userId;
+
+    try {
+        // Verify user is admin/creator of the meeting
+        const [meeting] = await db.query(
+            `SELECT created_by FROM meeting WHERE id = ?`,
+            [meetingId]
+        );
+
+        if (meeting.length === 0) {
+            return res.status(404).json({
+                success: false,
+                message: 'Meeting not found'
+            });
+        }
+
+        if (meeting[0].created_by !== userId) {
+            return res.status(403).json({
+                success: false,
+                message: 'Only meeting creator can approve alternates'
+            });
+        }
+
+        const [requests] = await db.query(
+            `SELECT 
+                ar.*,
+                requesting_user.name as requesting_user_name,
+                requesting_user.email as requesting_user_email,
+                alternate_user.name as alternate_user_name,
+                alternate_user.email as alternate_user_email,
+                mm.role as requesting_user_role
+            FROM meeting_alternate_requests ar
+            JOIN users requesting_user ON ar.requesting_user_id = requesting_user.id
+            JOIN users alternate_user ON ar.alternate_user_id = alternate_user.id
+            LEFT JOIN meeting_members mm ON mm.meeting_id = ar.meeting_id AND mm.user_id = ar.requesting_user_id
+            WHERE ar.meeting_id = ? AND ar.status = 'alternate_accepted'
+            ORDER BY ar.request_date DESC`,
+            [meetingId]
+        );
+
+        res.status(200).json({
+            success: true,
+            data: requests
+        });
+
+    } catch (error) {
+        console.error('Error fetching alternate requests for admin:', error);
+        res.status(500).json({
+            success: false,
+            message: 'Server error'
+        });
+    }
+};
+
+// Admin approves or rejects alternate request
+const adminApproveAlternate = async (req, res) => {
+    const { requestId, decision, adminRemarks } = req.body; // decision: 'approve' or 'reject'
+    const adminUserId = req.user.userId;
+
+    if (!requestId || !decision) {
+        return res.status(400).json({
+            success: false,
+            message: 'requestId and decision are required'
+        });
+    }
+
+    if (!['approve', 'reject'].includes(decision)) {
+        return res.status(400).json({
+            success: false,
+            message: 'decision must be "approve" or "reject"'
+        });
+    }
+
+    try {
+        // Get request details and verify admin is meeting creator
+        const [request] = await db.query(
+            `SELECT ar.*, m.created_by 
+             FROM meeting_alternate_requests ar
+             JOIN meeting m ON ar.meeting_id = m.id
+             WHERE ar.id = ? AND ar.status = 'alternate_accepted'`,
+            [requestId]
+        );
+
+        if (request.length === 0) {
+            return res.status(404).json({
+                success: false,
+                message: 'Request not found or not ready for admin approval'
+            });
+        }
+
+        if (request[0].created_by !== adminUserId) {
+            return res.status(403).json({
+                success: false,
+                message: 'Only meeting creator can approve alternates'
+            });
+        }
+
+        const newStatus = decision === 'approve' ? 'admin_approved' : 'admin_rejected';
+
+        await db.query(
+            `UPDATE meeting_alternate_requests 
+             SET status = ?, admin_response_date = CURRENT_TIMESTAMP, admin_remarks = ?
+             WHERE id = ?`,
+            [newStatus, adminRemarks || null, requestId]
+        );
+
+        // If approved, add alternate user to meeting members and update attendance
+        if (decision === 'approve') {
+            const { meeting_id, requesting_user_id, alternate_user_id } = request[0];
+
+            // Get the role of the requesting user
+            const [memberRole] = await db.query(
+                `SELECT role FROM meeting_members WHERE meeting_id = ? AND user_id = ?`,
+                [meeting_id, requesting_user_id]
+            );
+
+            if (memberRole.length > 0) {
+                // Add alternate user to meeting members with same role
+                await db.query(
+                    `INSERT INTO meeting_members (meeting_id, user_id, role)
+                     VALUES (?, ?, ?)
+                     ON DUPLICATE KEY UPDATE role = VALUES(role)`,
+                    [meeting_id, alternate_user_id, memberRole[0].role]
+                );
+            }
+        }
+
+        res.status(200).json({
+            success: true,
+            message: `Alternate request ${decision}d successfully`
+        });
+
+    } catch (error) {
+        console.error('Error approving alternate request:', error);
+        res.status(500).json({
+            success: false,
+            message: 'Server error'
+        });
+    }
+};
+
 module.exports = {
     createMeeting,
     assignResponsibility,
@@ -2472,5 +2826,10 @@ module.exports = {
     getMeetingStatus,
     updatePoint,
     getForwardedPoints,
-    approvePointForForwarding
+    approvePointForForwarding,
+    createAlternateRequest,
+    respondToAlternateRequest,
+    getAlternateRequests,
+    getAlternateRequestsForAdmin,
+    adminApproveAlternate
 }

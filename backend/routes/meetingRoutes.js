@@ -28,7 +28,12 @@ const {
     updatePoint,
     getForwardedPoints,
     approvePointForForwarding,
-    getForwardedPointHistory
+    getForwardedPointHistory,
+    createAlternateRequest,
+    respondToAlternateRequest,
+    getAlternateRequests,
+    getAlternateRequestsForAdmin,
+    adminApproveAlternate
 } = require('../controllers/meetingController');
 
 router.post('/create', verifyToken, createMeeting)
@@ -58,5 +63,12 @@ router.post('/update-point', verifyToken, updatePoint)
 router.post('/get-forwarded-points', verifyToken, getForwardedPoints)
 router.post('/forward-point-approve', verifyToken, approvePointForForwarding)
 router.get('/forwarded-point-history/:pointId', verifyToken, getForwardedPointHistory)
+
+// Alternate request routes
+router.post('/alternate-request/create', verifyToken, createAlternateRequest)
+router.post('/alternate-request/respond', verifyToken, respondToAlternateRequest)
+router.get('/alternate-request/my-requests', verifyToken, getAlternateRequests)
+router.get('/alternate-request/admin/:meetingId', verifyToken, getAlternateRequestsForAdmin)
+router.post('/alternate-request/admin-approve', verifyToken, adminApproveAlternate)
 
 module.exports = router;

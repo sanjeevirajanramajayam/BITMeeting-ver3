@@ -705,8 +705,9 @@ export default function JoinMeet() {
                     }}>
                         <MeetingRejection
                             onClose={handleCloseRejectCard}
-                            meetingId={meetingData.id}   // You must pass this from parent
-                            token={localStorage.getItem('token')}               // Your JWT token from context/localStorage
+                            meetingId={meetingData.id}
+                            token={localStorage.getItem('token')}
+                            meetingMembers={meetingData.members}
                         />
 
                     </Box>

@@ -32,6 +32,7 @@ import Reason from "../components/ViewReason";
 import VotingButtons from "../components/VotingButtons";
 import VotingDiagnostic from "../components/VotingDiagnostic";
 import PointHistoryModal from "../components/PointHistoryModal";
+import AlternateApprovalAdmin from "../components/AlternateApprovalAdmin";
 import { format } from "date-fns";
 import DatePick from "../components/date";
 import React from "react";
@@ -1219,6 +1220,13 @@ export default function StartMeet({ handleBack }) {
             </TableBody>
           </Table>
         </TableContainer>
+
+        {/* Alternate Approval Section - Only visible to admin/creator */}
+        {isAdmin && !onStart && (
+          <Box sx={{ width: "100%", mt: 2, mb: 2 }}>
+            <AlternateApprovalAdmin meetingId={meetingData?.id} />
+          </Box>
+        )}
 
         {/* Dynamic Content Based on Tab Selection */}
         {onStart && selectedTab === "attendance" ? (
