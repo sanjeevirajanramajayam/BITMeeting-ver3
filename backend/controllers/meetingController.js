@@ -4,6 +4,7 @@ const {
     format
 } = require("date-fns");
 const jwt = require('jsonwebtoken');
+const { sendMeetingInvitation } = require('../services/emailService');
 
 function groupMembersByRole(data) {
     const grouped = {};
@@ -313,6 +314,53 @@ const createMeeting = async (req, res) => {
         }
 
         await Promise.all([...pointPromises]);
+
+        // Send email notifications to all participants
+        try {
+            // Fetch participant details with emails
+            const [participants] = await db.query(
+                `SELECT DISTINCT u.id, u.name, u.email, mm.role
+                 FROM meeting_members mm
+                 JOIN users u ON mm.user_id = u.id
+                 WHERE mm.meeting_id = ? AND u.email IS NOT NULL`,
+                [meetingId]
+            );
+
+            if (participants.length > 0) {
+                // Fetch venue name and creator name
+                const [meetingInfo] = await db.query(
+                    `SELECT v.name as venue_name, u.name as created_by_name
+                     FROM meeting m
+                     LEFT JOIN venues v ON m.venue_id = v.id
+                     JOIN users u ON m.created_by = u.id
+                     WHERE m.id = ?`,
+                    [meetingId]
+                );
+
+                const meetingDetails = {
+                    meeting_name: meetingData.meeting_name,
+                    meeting_description: meetingData.meeting_description,
+                    start_time: meetingData.start_time,
+                    end_time: meetingData.end_time,
+                    venue_name: meetingInfo[0]?.venue_name || 'TBD',
+                    priority: meetingData.priority,
+                    created_by_name: meetingInfo[0]?.created_by_name || 'Admin',
+                    meetingId: meetingId
+                };
+
+                // Send emails asynchronously (don't wait for completion)
+                sendMeetingInvitation(meetingDetails, participants)
+                    .then(result => {
+                        console.log('Email notification result:', result);
+                    })
+                    .catch(err => {
+                        console.error('Failed to send email notifications:', err);
+                    });
+            }
+        } catch (emailError) {
+            // Log email error but don't fail the meeting creation
+            console.error('Error sending meeting invitations:', emailError);
+        }
 
         res.status(201).json({
             success: true,
@@ -2763,7 +2811,7 @@ const adminApproveAlternate = async (req, res) => {
             [newStatus, adminRemarks || null, requestId]
         );
 
-        // If approved, add alternate user to meeting members and update attendance
+        // If approved, add alternate user to meeting members and send email
         if (decision === 'approve') {
             const { meeting_id, requesting_user_id, alternate_user_id } = request[0];
 
@@ -2781,6 +2829,64 @@ const adminApproveAlternate = async (req, res) => {
                      ON DUPLICATE KEY UPDATE role = VALUES(role)`,
                     [meeting_id, alternate_user_id, memberRole[0].role]
                 );
+
+                // Send email notification to alternate user
+                try {
+                    // Fetch alternate user details
+                    const [alternateUser] = await db.query(
+                        `SELECT id, name, email FROM users WHERE id = ?`,
+                        [alternate_user_id]
+                    );
+
+                    // Fetch meeting details
+                    const [meetingDetails] = await db.query(
+                        `SELECT m.meeting_name, m.meeting_description, m.start_time, m.end_time,
+                                m.priority, v.name as venue_name, u.name as created_by_name
+                         FROM meeting m
+                         LEFT JOIN venues v ON m.venue_id = v.id
+                         JOIN users u ON m.created_by = u.id
+                         WHERE m.id = ?`,
+                        [meeting_id]
+                    );
+
+                    // Fetch original requesting user name
+                    const [requestingUser] = await db.query(
+                        `SELECT name FROM users WHERE id = ?`,
+                        [requesting_user_id]
+                    );
+
+                    if (alternateUser.length > 0 && alternateUser[0].email && meetingDetails.length > 0) {
+                        const participant = {
+                            email: alternateUser[0].email,
+                            name: alternateUser[0].name,
+                            role: memberRole[0].role,
+                            isAlternate: true,
+                            originalMember: requestingUser[0]?.name || 'a member'
+                        };
+
+                        const meeting = {
+                            meeting_name: meetingDetails[0].meeting_name,
+                            meeting_description: meetingDetails[0].meeting_description,
+                            start_time: meetingDetails[0].start_time,
+                            end_time: meetingDetails[0].end_time,
+                            venue_name: meetingDetails[0].venue_name || 'TBD',
+                            priority: meetingDetails[0].priority,
+                            created_by_name: meetingDetails[0].created_by_name,
+                            meetingId: meeting_id
+                        };
+
+                        // Send email asynchronously
+                        sendMeetingInvitation(meeting, [participant])
+                            .then(result => {
+                                console.log('Alternate approval email sent:', result);
+                            })
+                            .catch(err => {
+                                console.error('Failed to send alternate approval email:', err);
+                            });
+                    }
+                } catch (emailError) {
+                    console.error('Error sending alternate approval email:', emailError);
+                }
             }
         }
 
