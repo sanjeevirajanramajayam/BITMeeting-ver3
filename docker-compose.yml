@@ -1,0 +1,76 @@
+version: '3.9'
+
+services:
+  # Frontend Service
+  frontend:
+    build:
+      context: ./frontend
+      dockerfile: Dockerfile
+    container_name: bitmeetings-frontend
+    ports:
+      - "90:80"
+    environment:
+      - VITE_API_URL=http://localhost:7000
+    depends_on:
+      - backend
+    restart: unless-stopped
+    networks:
+      - bitmeetings-network
+
+  # Backend Service
+  backend:
+    build:
+      context: ./backend
+      dockerfile: Dockerfile
+    container_name: bitmeetings-backend
+    ports:
+      - "7000:7000"
+    environment:
+      - NODE_ENV=production
+      - PORT=7000
+      # Add your environment variables here
+      - DB_HOST=localhost
+      - DB_USER=bitmeetings_user
+      - DB_PASSWORD=bitmeetings123@
+      - DB_NAME=bitmeetings_db
+      - JWT_SECRET=your_jwt_secret
+      - GOOGLE_CLIENT_ID=your_google_client_id
+      - GOOGLE_CLIENT_SECRET=your_google_client_secret
+    volumes:
+      - ./backend/uploads:/app/uploads
+    depends_on:
+      - mysql
+    restart: unless-stopped
+    networks:
+      - bitmeetings-network
+
+  # MySQL Database Service (Optional - if you're using MySQL)
+  mysql:
+    image: mysql:8.0
+    container_name: bitmeetings-mysql
+    environment:
+      - MYSQL_ROOT_PASSWORD=root123
+      - MYSQL_DATABASE=bitmeetings_db
+      - MYSQL_USER=bitmeetings_user
+      - MYSQL_PASSWORD=bitmeetings123@
+    ports:
+      - "3308:3306"
+    volumes:
+      - mysql_data:/var/lib/mysql
+      - ./backend/database:/docker-entrypoint-initdb.d
+    restart: unless-stopped
+    networks:
+      - bitmeetings-network
+    healthcheck:
+      test: ["CMD", "mysqladmin", "ping", "-h", "localhost"]
+      interval: 10s
+      timeout: 5s
+      retries: 5
+
+networks:
+  bitmeetings-network:
+    driver: bridge
+
+volumes:
+  mysql_data:
+    driver: local
